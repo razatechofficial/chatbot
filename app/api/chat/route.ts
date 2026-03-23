@@ -166,16 +166,32 @@ async function fetchWebSearchResults(query: string, limit = 3) {
 }
 
 function shouldUseDatabase(userText: string): boolean {
-  return /\b(database|db|table|sql|count|total|sum|average|avg|top|list|records|rows|report|analytics|orders|users|sales|revenue)\b/i.test(
+  return /\b(database|db|table|sql|count|total|sum|average|avg|top|list|record|records|row|rows|report|analytics|order|orders|user|users|email|registered|register|signup|sign[-\s]?up|latest|last|newest|created_at|updated_at)\b/i.test(
     userText,
   );
+}
+
+function isLikelyDbFollowUp(messages: UIMessage[]): boolean {
+  const recentAssistant = [...messages]
+    .reverse()
+    .find((message) => message.role === "assistant");
+
+  if (!recentAssistant) return false;
+
+  const assistantText = recentAssistant.parts
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join(" ");
+
+  return /data source:\s*postgresql/i.test(assistantText);
 }
 
 async function runDbToolIfNeeded(
   userText: string,
   modelId: string,
+  forceUseDb: boolean,
 ): Promise<DbToolResult> {
-  if (!shouldUseDatabase(userText)) {
+  if (!forceUseDb) {
     return { ok: true, context: "" };
   }
 
@@ -309,9 +325,14 @@ export async function POST(req: Request) {
     const sanitizedMessages = sanitizeUiMessages(messages);
     const modelMessages = await convertToModelMessages(sanitizedMessages);
     const lastUserText = getLastUserText(sanitizedMessages);
-    const isDatabaseIntent = shouldUseDatabase(lastUserText);
+    const isDatabaseIntent =
+      shouldUseDatabase(lastUserText) || isLikelyDbFollowUp(sanitizedMessages);
     const enableWebSearch = !isDatabaseIntent;
-    const dbToolResult = await runDbToolIfNeeded(lastUserText, modelId);
+    const dbToolResult = await runDbToolIfNeeded(
+      lastUserText,
+      modelId,
+      isDatabaseIntent,
+    );
 
     let webContextBlock = "";
     if (enableWebSearch && lastUserText) {
