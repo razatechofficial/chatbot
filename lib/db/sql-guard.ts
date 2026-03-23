@@ -43,17 +43,21 @@ export function normalizeReadonlySql(sql: string, maxLimit = 200): GuardedSqlRes
     };
   }
 
-  const hasLimit = /\blimit\s+\d+\b/i.test(trimmed);
+  const hasLimit = /\blimit\b/i.test(trimmed);
   let normalizedSql = trimmed;
 
   if (!hasLimit) {
-    normalizedSql = `${normalizedSql}\nLIMIT ${maxLimit}`;
+    // Wrap query to enforce a safe outer limit without mutating internal syntax.
+    normalizedSql = `SELECT * FROM (${normalizedSql}) AS __readonly_subquery LIMIT ${maxLimit}`;
   } else {
-    normalizedSql = normalizedSql.replace(/\blimit\s+(\d+)\b/i, (_, value: string) => {
-      const parsed = Number(value);
-      const safeLimit = Number.isFinite(parsed) ? Math.min(parsed, maxLimit) : maxLimit;
-      return `LIMIT ${safeLimit}`;
-    });
+    normalizedSql = normalizedSql.replace(
+      /\blimit\s+(\d+)\b/i,
+      (_, value: string) => {
+        const parsed = Number(value);
+        const safeLimit = Number.isFinite(parsed) ? Math.min(parsed, maxLimit) : maxLimit;
+        return `LIMIT ${safeLimit}`;
+      },
+    );
   }
 
   return { ok: true, normalizedSql };
