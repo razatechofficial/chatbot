@@ -190,8 +190,9 @@ export async function POST(req: Request) {
 
     const result = streamText({
       model: groq(modelId),
+      temperature: 0.2,
       system: `You are a helpful assistant. Never output any function-call syntax such as <function=...>.
-${enableWebSearch ? "Use provided web context when relevant. If you include sources, they MUST be markdown links in this exact format: - [Title](https://...). Do not output plain source names, tag lists, or 'links tags' text." : ""}
+${enableWebSearch ? "Use provided web context when relevant. Output format must be:\n1) Short answer paragraph(s)\n2) A heading exactly 'Sources'\n3) Bullet list markdown links only, each exactly: - [Title](https://...)\nNever output plain source names, tag lists, 'links tags', or any non-link source format." : ""}
 ${webContextBlock ? `\n\n${webContextBlock}` : ""}`,
       messages: modelMessages,
     });

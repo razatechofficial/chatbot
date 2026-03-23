@@ -19,16 +19,37 @@ function sanitizeRenderedText(text: string): string {
     .trim();
 }
 
-function extractSources(text: string): Array<{ label: string; url: string }> {
-  const start = text.toLowerCase().indexOf("sources");
-  if (start === -1) return [];
+function normalizeSourceSection(text: string): string {
+  const hasMarkdownLinks = /\[[^\]]+\]\((https?:\/\/[^)]+)\)/i.test(text);
+  const cleaned = text.replace(/^\s*links?\s*tags?:.*$/gim, "");
 
-  const section = text.slice(start);
+  if (hasMarkdownLinks) {
+    // Remove the trailing Sources block from markdown body.
+    const sourcesMatch = cleaned.match(/\n\s*sources\s*:?\s*[\s\S]*$/i);
+    if (sourcesMatch && sourcesMatch.index !== undefined) {
+      return cleaned.slice(0, sourcesMatch.index).trim();
+    }
+    return cleaned.trim();
+  }
+
+  return cleaned
+    .replace(/^\s*sources?:.*$/gim, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractSources(text: string): Array<{ label: string; url: string }> {
+  const lowerText = text.toLowerCase();
+  const scopedText = lowerText.includes("sources")
+    ? text.slice(lowerText.indexOf("sources"))
+    : text;
+
   const linkRegex = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g;
+  const urlRegex = /(https?:\/\/[^\s)]+)/g;
   const links: Array<{ label: string; url: string }> = [];
   const seen = new Set<string>();
 
-  let match = linkRegex.exec(section);
+  let match = linkRegex.exec(scopedText);
   while (match) {
     const label = match[1]?.trim() || "Source";
     const url = match[2]?.trim();
@@ -36,7 +57,17 @@ function extractSources(text: string): Array<{ label: string; url: string }> {
       seen.add(url);
       links.push({ label, url });
     }
-    match = linkRegex.exec(section);
+    match = linkRegex.exec(scopedText);
+  }
+
+  let urlMatch = urlRegex.exec(scopedText);
+  while (urlMatch) {
+    const url = urlMatch[1]?.trim();
+    if (url && !seen.has(url)) {
+      seen.add(url);
+      links.push({ label: new URL(url).hostname.replace(/^www\./, ""), url });
+    }
+    urlMatch = urlRegex.exec(scopedText);
   }
 
   return links;
@@ -85,8 +116,9 @@ function MessageRow({ message, isStreaming, compact }: MessageRowProps) {
         <div className={`text-sm ${compact ? "leading-5" : "leading-6"}`}>
           {message.parts.map((part, idx) => {
             if (part.type === "text") {
-              const safeText = sanitizeRenderedText(part.text);
-              const sources = extractSources(safeText);
+              const sanitizedText = sanitizeRenderedText(part.text);
+              const sources = extractSources(sanitizedText);
+              const safeText = normalizeSourceSection(sanitizedText);
               const isLastAssistantText =
                 isStreaming &&
                 message.role === "assistant" &&
