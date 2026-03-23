@@ -7,22 +7,67 @@ type WebSearchResult = {
   snippet: string;
 };
 
-function shouldUseWebSearch(messages: UIMessage[]): boolean {
-  const lastUserMessage = [...messages]
-    .reverse()
-    .find((message) => message.role === "user");
+function stripFunctionSyntax(text: string): string {
+  return text
+    .replace(/<function=.*?>/gi, "")
+    .replace(/<\/function>/gi, "")
+    .replace(/```(?:xml|json)?\s*<function[\s\S]*?```/gi, "")
+    .trim();
+}
 
-  if (!lastUserMessage) return false;
+function sanitizeUiMessages(messages: UIMessage[]): UIMessage[] {
+  return messages.map((message) => ({
+    ...message,
+    parts: message.parts.map((part) => {
+      if (part.type !== "text") return part;
+      return {
+        ...part,
+        text: stripFunctionSyntax(part.text),
+      };
+    }),
+  }));
+}
 
-  const text = lastUserMessage.parts
-    .filter((part) => part.type === "text")
-    .map((part) => part.text)
-    .join(" ")
-    .toLowerCase();
+const AUTHORITATIVE_DOMAINS = [
+  "wikipedia.org",
+  "reuters.com",
+  "apnews.com",
+  "bbc.com",
+  "gov",
+  "edu",
+];
 
-  return /\b(search|latest|news|current|today|recent|web|weather|forecast|temperature|rain|humidity)\b/.test(
-    text,
+function getDomain(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function scoreResult(result: WebSearchResult): number {
+  const domain = getDomain(result.url);
+  if (!domain) return -100;
+  const isAuthoritative = AUTHORITATIVE_DOMAINS.some((candidate) =>
+    domain.endsWith(candidate),
   );
+  return isAuthoritative ? 10 : 0;
+}
+
+function improveSourceQuality(results: WebSearchResult[], limit = 3): WebSearchResult[] {
+  const byDomain = new Map<string, WebSearchResult>();
+
+  for (const result of results) {
+    const domain = getDomain(result.url);
+    if (!domain) continue;
+    if (!byDomain.has(domain)) {
+      byDomain.set(domain, result);
+    }
+  }
+
+  return [...byDomain.values()]
+    .sort((a, b) => scoreResult(b) - scoreResult(a))
+    .slice(0, limit);
 }
 
 function getLastUserText(messages: UIMessage[]): string {
@@ -75,14 +120,15 @@ async function fetchWebSearchResults(query: string, limit = 3) {
     results?: Array<{ title?: string; url?: string; content?: string }>;
   };
 
-  const results: WebSearchResult[] = (data.results ?? [])
+  const rawResults: WebSearchResult[] = (data.results ?? [])
     .filter((item) => item.url)
-    .slice(0, limit)
     .map((item) => ({
       title: item.title ?? "Untitled",
       url: item.url as string,
       snippet: item.content ?? "",
     }));
+
+  const results = improveSourceQuality(rawResults, limit);
 
   return { results, error: null };
 }
@@ -117,9 +163,10 @@ export async function POST(req: Request) {
 
     const modelId = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
 
-    const modelMessages = await convertToModelMessages(messages);
-    const enableWebSearch = shouldUseWebSearch(messages);
-    const lastUserText = getLastUserText(messages);
+    const sanitizedMessages = sanitizeUiMessages(messages);
+    const modelMessages = await convertToModelMessages(sanitizedMessages);
+    const enableWebSearch = true;
+    const lastUserText = getLastUserText(sanitizedMessages);
 
     let webContextBlock = "";
     if (enableWebSearch && lastUserText) {
@@ -132,16 +179,16 @@ export async function POST(req: Request) {
         .join("\n\n");
 
       webContextBlock = error
-        ? `Web search status: ${error}`
+        ? `Web search status: ${error}\nYou should still answer helpfully from your own knowledge, and clearly note that live search failed.`
         : sources
           ? `Use the following web results as context:\n\n${sources}`
-          : "Web search returned no results.";
+          : "Web search returned no results. You should still answer helpfully from your own knowledge and note that no live sources were found.";
     }
 
     const result = streamText({
       model: groq(modelId),
-      system: `You are a helpful assistant. Never output raw function-call syntax.
-${enableWebSearch ? "For search/weather/news requests, use provided web context and include a 'Sources' section with markdown links." : ""}
+      system: `You are a helpful assistant. Never output any function-call syntax such as <function=...>.
+${enableWebSearch ? "Use provided web context when relevant, include a 'Sources' section with markdown links, and avoid repeating multiple links from the same domain." : ""}
 ${webContextBlock ? `\n\n${webContextBlock}` : ""}`,
       messages: modelMessages,
     });
