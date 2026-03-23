@@ -23,11 +23,24 @@ export default function Home() {
                 {message.role === "user" ? "User" : "Assistant"}
               </p>
               <div className="whitespace-pre-wrap text-sm">
-                {message.parts.map((part, idx) =>
-                  part.type === "text" ? (
-                    <span key={`${message.id}-${idx}`}>{part.text}</span>
-                  ) : null,
-                )}
+                {message.parts.map((part, idx) => {
+                  if (part.type === "text") {
+                    return <span key={`${message.id}-${idx}`}>{part.text}</span>;
+                  }
+
+                  if (part.type === "tool-webSearch") {
+                    return (
+                      <pre
+                        key={`${message.id}-${idx}`}
+                        className="mt-2 overflow-x-auto rounded bg-zinc-100 p-2 text-xs dark:bg-zinc-900"
+                      >
+                        {JSON.stringify(part, null, 2)}
+                      </pre>
+                    );
+                  }
+
+                  return null;
+                })}
               </div>
             </div>
           ))

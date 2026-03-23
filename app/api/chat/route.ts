@@ -1,5 +1,12 @@
-import { streamText, UIMessage, convertToModelMessages } from "ai";
+import {
+  streamText,
+  UIMessage,
+  convertToModelMessages,
+  tool,
+  stepCountIs,
+} from "ai";
 import { groq } from "@ai-sdk/groq";
+import { z } from "zod";
 
 export async function POST(req: Request) {
   try {
@@ -34,6 +41,29 @@ export async function POST(req: Request) {
     const result = streamText({
       model: groq(modelId),
       messages: await convertToModelMessages(messages),
+      stopWhen: stepCountIs(5),
+      tools: {
+        webSearch: tool({
+          description:
+            "Search the web for recent information and return concise findings with links.",
+          inputSchema: z.object({
+            query: z.string().describe("Search query from the user"),
+            limit: z.number().min(1).max(5).default(3),
+          }),
+          execute: async ({ query, limit }) => {
+            // MVP stub: deterministic mocked search results.
+            return {
+              query,
+              results: Array.from({ length: limit }).map((_, index) => ({
+                title: `Result ${index + 1} for "${query}"`,
+                url: `https://example.com/search/${encodeURIComponent(query)}/${index + 1}`,
+                snippet:
+                  "Mocked search result for Phase 2 tool-calling validation.",
+              })),
+            };
+          },
+        }),
+      },
     });
 
     return result.toUIMessageStreamResponse();
