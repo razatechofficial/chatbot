@@ -1,12 +1,91 @@
-import {
-  streamText,
-  UIMessage,
-  convertToModelMessages,
-  tool,
-  stepCountIs,
-} from "ai";
+import { streamText, UIMessage, convertToModelMessages } from "ai";
 import { groq } from "@ai-sdk/groq";
-import { z } from "zod";
+
+type WebSearchResult = {
+  title: string;
+  url: string;
+  snippet: string;
+};
+
+function shouldUseWebSearch(messages: UIMessage[]): boolean {
+  const lastUserMessage = [...messages]
+    .reverse()
+    .find((message) => message.role === "user");
+
+  if (!lastUserMessage) return false;
+
+  const text = lastUserMessage.parts
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join(" ")
+    .toLowerCase();
+
+  return /\b(search|latest|news|current|today|recent|web|weather|forecast|temperature|rain|humidity)\b/.test(
+    text,
+  );
+}
+
+function getLastUserText(messages: UIMessage[]): string {
+  const lastUserMessage = [...messages]
+    .reverse()
+    .find((message) => message.role === "user");
+
+  if (!lastUserMessage) return "";
+
+  return lastUserMessage.parts
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join(" ")
+    .trim();
+}
+
+async function fetchWebSearchResults(query: string, limit = 3) {
+  const tavilyApiKey = process.env.TAVILY_API_KEY;
+
+  if (!tavilyApiKey) {
+    return {
+      results: [] as WebSearchResult[],
+      error:
+        "Missing TAVILY_API_KEY. Add it in client/.env.local to enable real web search.",
+    };
+  }
+
+  const response = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      api_key: tavilyApiKey,
+      query,
+      max_results: limit,
+      include_answer: false,
+      include_images: false,
+    }),
+  });
+
+  if (!response.ok) {
+    return {
+      results: [] as WebSearchResult[],
+      error: `Web search failed with status ${response.status}.`,
+    };
+  }
+
+  const data = (await response.json()) as {
+    results?: Array<{ title?: string; url?: string; content?: string }>;
+  };
+
+  const results: WebSearchResult[] = (data.results ?? [])
+    .filter((item) => item.url)
+    .slice(0, limit)
+    .map((item) => ({
+      title: item.title ?? "Untitled",
+      url: item.url as string,
+      snippet: item.content ?? "",
+    }));
+
+  return { results, error: null };
+}
 
 export async function POST(req: Request) {
   try {
@@ -38,35 +117,38 @@ export async function POST(req: Request) {
 
     const modelId = process.env.GROQ_MODEL ?? "llama-3.3-70b-versatile";
 
+    const modelMessages = await convertToModelMessages(messages);
+    const enableWebSearch = shouldUseWebSearch(messages);
+    const lastUserText = getLastUserText(messages);
+
+    let webContextBlock = "";
+    if (enableWebSearch && lastUserText) {
+      const { results, error } = await fetchWebSearchResults(lastUserText, 3);
+      const sources = results
+        .map(
+          (item, index) =>
+            `${index + 1}. ${item.title}\nURL: ${item.url}\nSnippet: ${item.snippet}`,
+        )
+        .join("\n\n");
+
+      webContextBlock = error
+        ? `Web search status: ${error}`
+        : sources
+          ? `Use the following web results as context:\n\n${sources}`
+          : "Web search returned no results.";
+    }
+
     const result = streamText({
       model: groq(modelId),
-      messages: await convertToModelMessages(messages),
-      stopWhen: stepCountIs(5),
-      tools: {
-        webSearch: tool({
-          description:
-            "Search the web for recent information and return concise findings with links.",
-          inputSchema: z.object({
-            query: z.string().describe("Search query from the user"),
-            limit: z.number().min(1).max(5).default(3),
-          }),
-          execute: async ({ query, limit }) => {
-            // MVP stub: deterministic mocked search results.
-            return {
-              query,
-              results: Array.from({ length: limit }).map((_, index) => ({
-                title: `Result ${index + 1} for "${query}"`,
-                url: `https://example.com/search/${encodeURIComponent(query)}/${index + 1}`,
-                snippet:
-                  "Mocked search result for Phase 2 tool-calling validation.",
-              })),
-            };
-          },
-        }),
-      },
+      system: `You are a helpful assistant. Never output raw function-call syntax.
+${enableWebSearch ? "For search/weather/news requests, use provided web context and include a 'Sources' section with markdown links." : ""}
+${webContextBlock ? `\n\n${webContextBlock}` : ""}`,
+      messages: modelMessages,
     });
 
-    return result.toUIMessageStreamResponse();
+    return result.toUIMessageStreamResponse({
+      onError: () => "I hit a temporary provider issue. Please try again.",
+    });
   } catch {
     return Response.json(
       { error: "Failed to process chat request." },
