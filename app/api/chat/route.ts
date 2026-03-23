@@ -177,18 +177,21 @@ export async function POST(req: Request) {
             `${index + 1}. ${item.title}\nURL: ${item.url}\nSnippet: ${item.snippet}`,
         )
         .join("\n\n");
+      const sourceLinkTemplate = results
+        .map((item) => `- [${item.title}](${item.url})`)
+        .join("\n");
 
       webContextBlock = error
         ? `Web search status: ${error}\nYou should still answer helpfully from your own knowledge, and clearly note that live search failed.`
         : sources
-          ? `Use the following web results as context:\n\n${sources}`
+          ? `Use the following web results as context:\n\n${sources}\n\nWhen adding Sources, only use this exact markdown link format:\n${sourceLinkTemplate}`
           : "Web search returned no results. You should still answer helpfully from your own knowledge and note that no live sources were found.";
     }
 
     const result = streamText({
       model: groq(modelId),
       system: `You are a helpful assistant. Never output any function-call syntax such as <function=...>.
-${enableWebSearch ? "Use provided web context when relevant, include a 'Sources' section with markdown links, and avoid repeating multiple links from the same domain." : ""}
+${enableWebSearch ? "Use provided web context when relevant. If you include sources, they MUST be markdown links in this exact format: - [Title](https://...). Do not output plain source names, tag lists, or 'links tags' text." : ""}
 ${webContextBlock ? `\n\n${webContextBlock}` : ""}`,
       messages: modelMessages,
     });
