@@ -120,7 +120,7 @@ function MessageRow({ message, isStreaming, compact }: MessageRowProps) {
 
               return (
                 <div key={`${message.id}-${idx}`} className="space-y-2">
-                  <div className="prose prose-zinc max-w-none text-inherit dark:prose-invert prose-p:my-1.5 prose-pre:my-2 prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:border prose-pre:border-zinc-200 prose-pre:bg-zinc-50 prose-pre:p-3 dark:prose-pre:border-zinc-700 dark:prose-pre:bg-zinc-950 prose-code:rounded prose-code:bg-zinc-200/70 prose-code:px-1 prose-code:py-0.5 prose-code:before:content-[''] prose-code:after:content-[''] dark:prose-code:bg-zinc-800/90 prose-table:my-3 prose-table:block prose-table:w-full prose-table:overflow-x-auto prose-table:rounded-lg prose-table:border prose-table:border-zinc-300 dark:prose-table:border-zinc-700 prose-th:border prose-th:border-zinc-300 prose-th:bg-zinc-100 prose-th:px-3 prose-th:py-2 dark:prose-th:border-zinc-700 dark:prose-th:bg-zinc-800 prose-td:border prose-td:border-zinc-300 prose-td:px-3 prose-td:py-2 dark:prose-td:border-zinc-700">
+                  <div className="prose prose-zinc max-w-none text-inherit dark:prose-invert prose-p:my-1.5 prose-pre:my-2 prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:border prose-pre:border-zinc-200 prose-pre:bg-zinc-50 prose-pre:p-3 dark:prose-pre:border-zinc-700 dark:prose-pre:bg-zinc-950 prose-code:rounded prose-code:bg-zinc-200/70 prose-code:px-1 prose-code:py-0.5 prose-code:before:content-[''] prose-code:after:content-[''] dark:prose-code:bg-zinc-800/90">
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}
                       components={{
@@ -147,6 +147,23 @@ function MessageRow({ message, isStreaming, compact }: MessageRowProps) {
                           <pre className="my-2 overflow-x-auto rounded-lg border border-zinc-300 bg-zinc-50 p-3 text-xs dark:border-zinc-700 dark:bg-zinc-950">
                             {children}
                           </pre>
+                        ),
+                        table: ({ children }) => (
+                          <div className="my-3 w-full overflow-x-auto rounded-lg border border-zinc-300 dark:border-zinc-700">
+                            <table className="min-w-full w-max border-collapse text-xs sm:text-sm">
+                              {children}
+                            </table>
+                          </div>
+                        ),
+                        th: ({ children }) => (
+                          <th className="whitespace-nowrap border border-zinc-300 bg-zinc-100 px-3 py-2 text-left font-semibold dark:border-zinc-700 dark:bg-zinc-800">
+                            {children}
+                          </th>
+                        ),
+                        td: ({ children }) => (
+                          <td className="whitespace-nowrap border border-zinc-300 px-3 py-2 align-top dark:border-zinc-700">
+                            {children}
+                          </td>
                         ),
                         code: ({ children }) => (
                           <code className="rounded bg-zinc-200/70 px-1 py-0.5 text-[0.9em] dark:bg-zinc-800/90">
