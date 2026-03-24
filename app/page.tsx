@@ -21,9 +21,7 @@ export default function Home() {
               <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
                 Modern AI Chat
               </h1>
-              <p className="mt-1 text-sm text-zinc-500">
-                Ask anything. Answers render in markdown with source links.
-              </p>
+              <p className="mt-1 text-sm text-zinc-500">Ask anything.</p>
             </div>
             <button
               type="button"

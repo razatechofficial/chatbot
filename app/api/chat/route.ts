@@ -412,6 +412,11 @@ export async function POST(req: Request) {
     const enableWebSearch = plan.action === "web";
     const isDatabaseIntent = plan.action === "db";
     const dbToolResult = await runDbToolIfNeeded(plan);
+    const sourceMode = isDatabaseIntent
+      ? "postgresql"
+      : enableWebSearch
+        ? "web"
+        : "none";
 
     let webContextBlock = "";
     if (enableWebSearch && lastUserText) {
@@ -434,18 +439,43 @@ export async function POST(req: Request) {
           : "Web search returned no results. You should still answer helpfully from your own knowledge and note that no live sources were found.";
     }
 
-    const result = streamText({
-      model: groq(modelId),
-      temperature: 0.2,
-      system: `You are a helpful assistant. Never output any function-call syntax such as <function=...>.
+    let result;
+    try {
+      result = streamText({
+        model: groq(modelId),
+        temperature: 0.2,
+        system: `You are a helpful assistant. Never output any function-call syntax such as <function=...>.
 ${enableWebSearch ? "Use provided web context when relevant. Output format must be:\n1) Short answer paragraph(s)\n2) A heading exactly 'Sources'\n3) Bullet list markdown links only, each exactly: - [Title](https://...)\nNever output plain source names, tag lists, 'links tags', or any non-link source format." : ""}
 ${webContextBlock ? `\n\n${webContextBlock}` : ""}
 ${dbToolResult.context ? `\n\n${dbToolResult.context}` : ""}
 ${plan.reason ? `\n\nPlanner note: ${plan.reason}` : ""}
 ${isDatabaseIntent ? 'This is a database-intent request. Do not use web assumptions or external claims. If database lookup is unavailable, explicitly say you cannot verify the answer because database access failed and ask user to check credentials/table names.' : ""}
-When database context is present, include a short line like "Data source: PostgreSQL" in the answer.`,
-      messages: modelMessages,
-    });
+For this response, data source policy is "${sourceMode}".
+- If source mode is "postgresql": include exactly one line "Data source: PostgreSQL".
+- If source mode is "web": include sources section with links and do NOT claim PostgreSQL.
+- If source mode is "none": do NOT claim PostgreSQL or web sources.`,
+        messages: modelMessages,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/rate limit|429|tokens per day/i.test(message)) {
+        return Response.json(
+          {
+            error:
+              "Model rate limit reached for now. Please wait a few minutes and retry, or switch to a lower-cost model.",
+          },
+          { status: 429 },
+        );
+      }
+      console.error("Final generation setup failed:", error);
+      return Response.json(
+        {
+          error:
+            "I could not generate a response right now. Please retry in a moment.",
+        },
+        { status: 503 },
+      );
+    }
 
     return result.toUIMessageStreamResponse({
       onError: () => "I hit a temporary provider issue. Please try again.",
@@ -461,6 +491,7 @@ When database context is present, include a short line like "Data source: Postgr
         { status: 429 },
       );
     }
+    console.error("Chat route failed:", error);
     return Response.json(
       { error: "Failed to process chat request." },
       { status: 500 },
