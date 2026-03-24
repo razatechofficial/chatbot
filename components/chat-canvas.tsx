@@ -19,54 +19,49 @@ function sanitizeRenderedText(text: string): string {
     .trim();
 }
 
-function normalizeSourceSection(text: string): string {
+function parseAssistantContent(text: string): {
+  bodyMarkdown: string;
+  sources: Array<{ label: string; url: string }>;
+} {
   const cleaned = text.replace(/^\s*links?\s*tags?:.*$/gim, "");
-  // Always strip trailing sources block from rendered markdown body.
-  // Supports plain `Sources`, `Sources:`, and markdown headings like `## Sources`.
-  const sourcesMatch = cleaned.match(
-    /(^|\n)\s*(?:#{1,6}\s*)?sources\s*:?\s*(?:\n|$)[\s\S]*$/i,
-  );
-  const withoutSources =
-    sourcesMatch && sourcesMatch.index !== undefined
-      ? cleaned.slice(0, sourcesMatch.index)
-      : cleaned;
-
-  return withoutSources.replace(/\n{3,}/g, "\n\n").trim();
-}
-
-function extractSources(text: string): Array<{ label: string; url: string }> {
-  const lowerText = text.toLowerCase();
-  const scopedText = lowerText.includes("sources")
-    ? text.slice(lowerText.indexOf("sources"))
-    : text;
+  const lowerText = cleaned.toLowerCase();
+  const sourceStart = lowerText.search(/(^|\n)\s*(?:#{1,6}\s*)?sources\s*:?\s*(?:\n|$)/i);
+  const sourceSection = sourceStart >= 0 ? cleaned.slice(sourceStart) : cleaned;
+  const bodyMarkdown = (sourceStart >= 0 ? cleaned.slice(0, sourceStart) : cleaned)
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 
   const linkRegex = /\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g;
   const urlRegex = /(https?:\/\/[^\s)]+)/g;
-  const links: Array<{ label: string; url: string }> = [];
+  const sources: Array<{ label: string; url: string }> = [];
   const seen = new Set<string>();
 
-  let match = linkRegex.exec(scopedText);
+  let match = linkRegex.exec(sourceSection);
   while (match) {
     const label = match[1]?.trim() || "Source";
     const url = match[2]?.trim();
     if (url && !seen.has(url)) {
       seen.add(url);
-      links.push({ label, url });
+      sources.push({ label, url });
     }
-    match = linkRegex.exec(scopedText);
+    match = linkRegex.exec(sourceSection);
   }
 
-  let urlMatch = urlRegex.exec(scopedText);
+  let urlMatch = urlRegex.exec(sourceSection);
   while (urlMatch) {
     const url = urlMatch[1]?.trim();
     if (url && !seen.has(url)) {
       seen.add(url);
-      links.push({ label: new URL(url).hostname.replace(/^www\./, ""), url });
+      try {
+        sources.push({ label: new URL(url).hostname.replace(/^www\./, ""), url });
+      } catch {
+        // skip invalid URL forms
+      }
     }
-    urlMatch = urlRegex.exec(scopedText);
+    urlMatch = urlRegex.exec(sourceSection);
   }
 
-  return links;
+  return { bodyMarkdown, sources };
 }
 
 type MessageRowProps = {
@@ -117,8 +112,7 @@ function MessageRow({ message, isStreaming, compact }: MessageRowProps) {
           {message.parts.map((part, idx) => {
             if (part.type === "text") {
               const sanitizedText = sanitizeRenderedText(part.text);
-              const sources = extractSources(sanitizedText);
-              const safeText = normalizeSourceSection(sanitizedText);
+              const parsedContent = parseAssistantContent(sanitizedText);
               const isLastAssistantText =
                 isStreaming &&
                 message.role === "assistant" &&
@@ -161,15 +155,15 @@ function MessageRow({ message, isStreaming, compact }: MessageRowProps) {
                         ),
                       }}
                     >
-                      {safeText}
+                      {parsedContent.bodyMarkdown}
                     </ReactMarkdown>
                     {isLastAssistantText ? (
                       <span className="ml-1 inline-block h-4 w-2 animate-pulse rounded-sm bg-zinc-500 align-middle dark:bg-zinc-300" />
                     ) : null}
                   </div>
-                  {sources.length > 0 ? (
+                  {parsedContent.sources.length > 0 ? (
                     <div className="flex flex-wrap gap-2">
-                      {sources.slice(0, 6).map((source) => (
+                      {parsedContent.sources.slice(0, 6).map((source) => (
                         <a
                           key={source.url}
                           href={source.url}
