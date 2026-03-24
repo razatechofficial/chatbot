@@ -79,15 +79,24 @@ export function validateSqlIdentifiers(
 ): IdentifierValidationResult {
   const normalized = sql.toLowerCase();
   const allowedSet = new Set(allowedTables.map((t) => t.toLowerCase()));
+  const aliasToTable = new Map<string, string>();
 
-  const tableMatches = [...normalized.matchAll(/\b(?:from|join)\s+([a-z_][a-z0-9_]*)\b/gi)];
+  const tableMatches = [
+    ...normalized.matchAll(
+      /\b(?:from|join)\s+([a-z_][a-z0-9_]*)(?:\s+(?:as\s+)?([a-z_][a-z0-9_]*))?\b/gi,
+    ),
+  ];
   for (const match of tableMatches) {
     const table = match[1]?.toLowerCase();
+    const alias = match[2]?.toLowerCase();
     if (table && !allowedSet.has(table)) {
       return {
         ok: false,
         reason: `Table '${table}' is not in allowed selected schema.`,
       };
+    }
+    if (table && alias) {
+      aliasToTable.set(alias, table);
     }
   }
 
@@ -95,9 +104,10 @@ export function validateSqlIdentifiers(
     ...normalized.matchAll(/\b([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\b/gi),
   ];
   for (const match of qualifiedColumnMatches) {
-    const table = match[1]?.toLowerCase();
+    const rawQualifier = match[1]?.toLowerCase();
     const column = match[2]?.toLowerCase();
-    if (!table || !column) continue;
+    if (!rawQualifier || !column) continue;
+    const table = aliasToTable.get(rawQualifier) ?? rawQualifier;
     if (!allowedSet.has(table)) {
       return { ok: false, reason: `Table '${table}' is not allowed.` };
     }

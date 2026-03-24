@@ -36,6 +36,25 @@ const DbPlanSchema = z.object({
   reason: z.string().nullable().optional(),
 });
 
+type PlannerPath =
+  | "deterministic_override"
+  | "normal_planner"
+  | "planner_error_fallback"
+  | "planner_invalid_json_fallback"
+  | "planner_shape_fallback"
+  | "planner_parse_fallback"
+  | "db_fallback_schema_unavailable";
+
+type PlannerDecision = {
+  plan: z.infer<typeof DbPlanSchema>;
+  plannerPath: PlannerPath;
+};
+
+const SqlRepairSchema = z.object({
+  sql: z.string().min(1),
+  reason: z.string().optional(),
+});
+
 function extractJsonObject(text: string): string | null {
   const firstBrace = text.indexOf("{");
   const lastBrace = text.lastIndexOf("}");
@@ -258,16 +277,19 @@ Return STRICT JSON only:
 async function planToolInvocation(
   userText: string,
   modelId: string,
-): Promise<PlannerResult> {
+): Promise<PlannerDecision> {
   const override = getRouteOverride(userText);
   if (override) {
     return {
-      action: override,
-      intent: userText,
-      webQuery: override === "web" ? userText : undefined,
-      sql: undefined,
-      params: [],
-      reason: `Routed by deterministic override: ${override}`,
+      plan: {
+        action: override,
+        intent: userText,
+        webQuery: override === "web" ? userText : undefined,
+        sql: undefined,
+        params: [],
+        reason: `Routed by deterministic override: ${override}`,
+      },
+      plannerPath: "deterministic_override",
     };
   }
 
@@ -352,26 +374,32 @@ ${schemaContext}
     const isRateLimited =
       /rate limit/i.test(message) || /429/.test(message) || /tokens per day/i.test(message);
     return {
-      action: "none",
-      intent: "",
-      webQuery: undefined,
-      sql: undefined,
-      params: [],
-      reason: isRateLimited
-        ? "Planner skipped because model rate limit was reached."
-        : "Planner call failed; fallback to direct response.",
+      plan: {
+        action: "none",
+        intent: "",
+        webQuery: undefined,
+        sql: undefined,
+        params: [],
+        reason: isRateLimited
+          ? "Planner skipped because model rate limit was reached."
+          : "Planner call failed; fallback to direct response.",
+      },
+      plannerPath: "planner_error_fallback",
     };
   }
 
   const maybeJson = extractJsonObject(text);
   if (!maybeJson) {
     return {
-      action: "none",
-      intent: "",
-      webQuery: null,
-      sql: undefined,
-      params: [],
-      reason: "Planner returned invalid JSON.",
+      plan: {
+        action: "none",
+        intent: "",
+        webQuery: null,
+        sql: undefined,
+        params: [],
+        reason: "Planner returned invalid JSON.",
+      },
+      plannerPath: "planner_invalid_json_fallback",
     };
   }
 
@@ -406,12 +434,15 @@ ${schemaContext}
     const result = DbPlanSchema.safeParse(parsed);
     if (!result.success) {
       return {
-        action: "none",
-        intent: "",
-        webQuery: undefined,
-        sql: undefined,
-        params: [],
-        reason: "Planner JSON shape invalid; fallback to direct response.",
+        plan: {
+          action: "none",
+          intent: "",
+          webQuery: undefined,
+          sql: undefined,
+          params: [],
+          reason: "Planner JSON shape invalid; fallback to direct response.",
+        },
+        plannerPath: "planner_shape_fallback",
       };
     }
 
@@ -422,25 +453,36 @@ ${schemaContext}
     ) {
       const fallback = await generateDbFallbackPlan(userText, modelId);
       if (fallback) {
-        return fallback;
+        return {
+          plan: fallback,
+          plannerPath: "db_fallback_schema_unavailable",
+        };
       }
     }
 
-    return result.data;
+    return {
+      plan: result.data,
+      plannerPath: "normal_planner",
+    };
   } catch {
     return {
-      action: "none",
-      intent: "",
-      webQuery: undefined,
-      sql: undefined,
-      params: [],
-      reason: "Planner JSON parse failed; fallback to direct response.",
+      plan: {
+        action: "none",
+        intent: "",
+        webQuery: undefined,
+        sql: undefined,
+        params: [],
+        reason: "Planner JSON parse failed; fallback to direct response.",
+      },
+      plannerPath: "planner_parse_fallback",
     };
   }
 }
 
 async function runDbToolIfNeeded(
   plan: PlannerResult,
+  userText: string,
+  modelId: string,
 ): Promise<DbToolResult> {
   if (plan.action !== "db") {
     return { ok: true, context: "" };
@@ -453,7 +495,19 @@ async function runDbToolIfNeeded(
         context: "Database tool failed: planner did not return SQL.",
       };
     }
-    const guarded = normalizeReadonlySql(plan.sql);
+    let candidateSql = plan.sql;
+    const isVendorEmailRequest =
+      /\bvendor/.test(userText.toLowerCase()) && /\bemail\b/.test(userText.toLowerCase());
+    const plannerUsedVendorsWithoutUsersJoin =
+      /\bfrom\s+vendors\b/i.test(candidateSql) && !/\bjoin\s+users\b/i.test(candidateSql);
+    if (isVendorEmailRequest && plannerUsedVendorsWithoutUsersJoin) {
+      candidateSql = `SELECT COALESCE(v.name, v.business_name) AS name, u.email
+FROM vendors v
+LEFT JOIN users u ON u.user_id = v.user_id_fk
+WHERE u.email IS NOT NULL`;
+    }
+
+    const guarded = normalizeReadonlySql(candidateSql);
     if (!guarded.ok) {
       return {
         ok: false,
@@ -462,9 +516,15 @@ async function runDbToolIfNeeded(
     }
 
     const snapshot = await getSchemaSnapshot();
-    const selectedTables = (plan.selectedTables ?? Object.keys(snapshot.tables)).map((t) =>
-      t.toLowerCase(),
-    );
+    const selectedTables = (plan.selectedTables ?? Object.keys(snapshot.tables)).map((t) => t.toLowerCase());
+    const effectiveTables = new Set(selectedTables);
+    for (const rel of snapshot.relationships) {
+      const source = rel.sourceTable.toLowerCase();
+      const target = rel.targetTable.toLowerCase();
+      if (effectiveTables.has(source)) effectiveTables.add(target);
+      if (effectiveTables.has(target)) effectiveTables.add(source);
+    }
+    const allowedTables = [...effectiveTables];
     const tableColumns = Object.fromEntries(
       Object.entries(snapshot.tables).map(([table, cols]) => [
         table.toLowerCase(),
@@ -473,7 +533,7 @@ async function runDbToolIfNeeded(
     );
     const idCheck = validateSqlIdentifiers(
       guarded.normalizedSql,
-      selectedTables,
+      allowedTables,
       tableColumns,
     );
     if (!idCheck.ok) {
@@ -483,11 +543,76 @@ async function runDbToolIfNeeded(
       };
     }
 
-    const result = await queryDb<Record<string, unknown>>(
-      guarded.normalizedSql,
-      plan.params,
-      { queryTimeoutMs: 5_000, statementTimeoutMs: 5_000 },
-    );
+    let result;
+    try {
+      result = await queryDb<Record<string, unknown>>(
+        guarded.normalizedSql,
+        plan.params,
+        { queryTimeoutMs: 5_000, statementTimeoutMs: 5_000 },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const isSchemaError =
+        /column .* does not exist/i.test(message) ||
+        /relation .* does not exist/i.test(message) ||
+        /\b42703\b/.test(message) ||
+        /\b42p01\b/i.test(message);
+      if (!isSchemaError) throw error;
+
+      const schemaContext = buildSelectedSchemaPromptContext(snapshot, allowedTables);
+      const repair = await generateText({
+        model: groq(modelId),
+        temperature: 0,
+        prompt: `Fix the SQL query using the available schema only.
+
+User request: "${userText}"
+Current SQL: ${guarded.normalizedSql}
+Execution error: ${message}
+
+Rules:
+- Read-only SQL only (SELECT / WITH ... SELECT)
+- Use only listed tables/columns
+- Prefer joining related tables if needed (for example vendors -> users for email)
+- Return STRICT JSON only: {"sql":"...","reason":"..."}
+
+Schema:
+${schemaContext}`,
+      });
+
+      const repairJson = extractJsonObject(repair.text);
+      if (!repairJson) throw error;
+      const repairedRaw = JSON.parse(repairJson) as Record<string, unknown>;
+      const repaired = SqlRepairSchema.safeParse({
+        sql:
+          repairedRaw.sql == null
+            ? ""
+            : typeof repairedRaw.sql === "string"
+              ? repairedRaw.sql
+              : String(repairedRaw.sql),
+        reason:
+          repairedRaw.reason == null
+            ? undefined
+            : typeof repairedRaw.reason === "string"
+              ? repairedRaw.reason
+              : String(repairedRaw.reason),
+      });
+      if (!repaired.success) throw error;
+
+      const repairedGuarded = normalizeReadonlySql(repaired.data.sql);
+      if (!repairedGuarded.ok) throw error;
+      const repairedIdCheck = validateSqlIdentifiers(
+        repairedGuarded.normalizedSql,
+        allowedTables,
+        tableColumns,
+      );
+      if (!repairedIdCheck.ok) throw error;
+
+      result = await queryDb<Record<string, unknown>>(
+        repairedGuarded.normalizedSql,
+        plan.params,
+        { queryTimeoutMs: 5_000, statementTimeoutMs: 5_000 },
+      );
+    }
 
     const previewRows = result.rows.slice(0, 20);
     return {
@@ -545,8 +670,10 @@ export async function POST(req: Request) {
     const sanitizedMessages = sanitizeUiMessages(messages);
     const modelMessages = await convertToModelMessages(sanitizedMessages);
     const lastUserText = getLastUserText(sanitizedMessages);
-    const plan = await planToolInvocation(lastUserText, modelId);
+    const decision = await planToolInvocation(lastUserText, modelId);
+    const plan = decision.plan;
     console.info("tool_plan", {
+      plannerPath: decision.plannerPath,
       action: plan.action,
       selectedTables: plan.selectedTables ?? [],
       hasSql: Boolean(plan.sql),
@@ -555,8 +682,8 @@ export async function POST(req: Request) {
     });
     const enableWebSearch = plan.action === "web";
     const isDatabaseIntent = plan.action === "db";
-    const dbToolResult = await runDbToolIfNeeded(plan);
-    const sourceMode = isDatabaseIntent
+    const dbToolResult = await runDbToolIfNeeded(plan, lastUserText, modelId);
+    const sourceMode = isDatabaseIntent && dbToolResult.ok
       ? "postgresql"
       : enableWebSearch
         ? "web"
