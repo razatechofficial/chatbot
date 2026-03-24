@@ -15,6 +15,15 @@ export type GuardedSqlResult =
       reason: string;
     };
 
+export type IdentifierValidationResult =
+  | {
+      ok: true;
+    }
+  | {
+      ok: false;
+      reason: string;
+    };
+
 export function normalizeReadonlySql(sql: string, maxLimit = 200): GuardedSqlResult {
   const trimmed = sql.trim().replace(/;+$/, "");
 
@@ -61,4 +70,45 @@ export function normalizeReadonlySql(sql: string, maxLimit = 200): GuardedSqlRes
   }
 
   return { ok: true, normalizedSql };
+}
+
+export function validateSqlIdentifiers(
+  sql: string,
+  allowedTables: string[],
+  tableColumns: Record<string, string[]>,
+): IdentifierValidationResult {
+  const normalized = sql.toLowerCase();
+  const allowedSet = new Set(allowedTables.map((t) => t.toLowerCase()));
+
+  const tableMatches = [...normalized.matchAll(/\b(?:from|join)\s+([a-z_][a-z0-9_]*)\b/gi)];
+  for (const match of tableMatches) {
+    const table = match[1]?.toLowerCase();
+    if (table && !allowedSet.has(table)) {
+      return {
+        ok: false,
+        reason: `Table '${table}' is not in allowed selected schema.`,
+      };
+    }
+  }
+
+  const qualifiedColumnMatches = [
+    ...normalized.matchAll(/\b([a-z_][a-z0-9_]*)\.([a-z_][a-z0-9_]*)\b/gi),
+  ];
+  for (const match of qualifiedColumnMatches) {
+    const table = match[1]?.toLowerCase();
+    const column = match[2]?.toLowerCase();
+    if (!table || !column) continue;
+    if (!allowedSet.has(table)) {
+      return { ok: false, reason: `Table '${table}' is not allowed.` };
+    }
+    const cols = tableColumns[table] ?? [];
+    if (!cols.includes(column)) {
+      return {
+        ok: false,
+        reason: `Column '${table}.${column}' does not exist in selected schema.`,
+      };
+    }
+  }
+
+  return { ok: true };
 }

@@ -19,6 +19,28 @@ type SchemaSnapshot = {
   relationships: ForeignKey[];
 };
 
+const KEYWORD_TABLE_MAP: Record<string, string[]> = {
+  user: ["users", "vendors"],
+  users: ["users", "vendors"],
+  email: ["users"],
+  vendor: ["vendors", "vendor_services"],
+  vendors: ["vendors", "vendor_services"],
+  service: ["vendor_services", "vendors"],
+  services: ["vendor_services", "vendors"],
+  price: ["vendor_services"],
+  rating: ["vendors"],
+  city: ["vendors"],
+  state: ["vendors"],
+  active: ["users", "vendors", "vendor_services"],
+  latest: ["users", "vendors", "vendor_services"],
+  last: ["users", "vendors", "vendor_services"],
+  created: ["users", "vendors", "vendor_services"],
+  signup: ["users"],
+  register: ["users"],
+};
+
+const DEFAULT_CANDIDATE_TABLES = ["users", "vendors", "vendor_services"];
+
 const CACHE_TTL_MS = 5 * 60 * 1000;
 let cache: { value: SchemaSnapshot; expiresAt: number } | null = null;
 
@@ -88,6 +110,87 @@ export async function getSchemaSnapshot(forceRefresh = false): Promise<SchemaSna
   };
 
   return snapshot;
+}
+
+export function getKeywordCandidateTables(
+  userText: string,
+  snapshot: SchemaSnapshot,
+  maxTables = 8,
+): string[] {
+  const normalized = userText.toLowerCase();
+  const selected = new Set<string>();
+  const availableTables = new Set(Object.keys(snapshot.tables));
+
+  for (const [keyword, tables] of Object.entries(KEYWORD_TABLE_MAP)) {
+    if (normalized.includes(keyword)) {
+      for (const table of tables) {
+        if (availableTables.has(table)) selected.add(table);
+      }
+    }
+  }
+
+  if (selected.size === 0) {
+    for (const table of DEFAULT_CANDIDATE_TABLES) {
+      if (availableTables.has(table)) selected.add(table);
+    }
+  }
+
+  if (selected.size === 0) {
+    for (const table of Object.keys(snapshot.tables).slice(0, maxTables)) {
+      selected.add(table);
+    }
+  }
+
+  return [...selected].slice(0, maxTables);
+}
+
+export function buildTableIndex(
+  snapshot: SchemaSnapshot,
+  tables: string[],
+): string {
+  return tables
+    .map((table) => {
+      const cols = (snapshot.tables[table] ?? [])
+        .slice(0, 12)
+        .map((col) => col.name)
+        .join(", ");
+      return `${table} — columns: ${cols}`;
+    })
+    .join("\n");
+}
+
+export function buildSelectedSchemaPromptContext(
+  snapshot: SchemaSnapshot,
+  selectedTables: string[],
+): string {
+  const selected = selectedTables.filter((t) => snapshot.tables[t]);
+  const tableLines = selected.map((tableName) => {
+    const cols = snapshot.tables[tableName]
+      .map((c) => `${c.name}:${c.type}`)
+      .join(", ");
+    return `- ${tableName}(${cols})`;
+  });
+
+  const relationLines = snapshot.relationships
+    .filter(
+      (rel) =>
+        selected.includes(rel.sourceTable) || selected.includes(rel.targetTable),
+    )
+    .slice(0, 20)
+    .map(
+      (rel) =>
+        `- ${rel.sourceTable}.${rel.sourceColumn} -> ${rel.targetTable}.${rel.targetColumn}`,
+    );
+
+  return [
+    `Schema snapshot generated at: ${snapshot.generatedAt}`,
+    "Selected tables:",
+    ...tableLines,
+    relationLines.length ? "Relationships:" : "",
+    ...relationLines,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 export function buildSchemaPromptContext(

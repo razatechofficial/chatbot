@@ -3,10 +3,12 @@ import { groq } from "@ai-sdk/groq";
 import { z } from "zod";
 import { queryDb } from "@/lib/db/client";
 import {
-  buildSchemaPromptContext,
+  buildSelectedSchemaPromptContext,
+  buildTableIndex,
+  getKeywordCandidateTables,
   getSchemaSnapshot,
 } from "@/lib/db/schema-context";
-import { normalizeReadonlySql } from "@/lib/db/sql-guard";
+import { normalizeReadonlySql, validateSqlIdentifiers } from "@/lib/db/sql-guard";
 
 type WebSearchResult = {
   title: string;
@@ -30,6 +32,7 @@ const DbPlanSchema = z.object({
   webQuery: z.string().nullable().optional(),
   sql: z.string().nullable().optional(),
   params: z.array(z.union([z.string(), z.number(), z.boolean(), z.null()])).default([]),
+  selectedTables: z.array(z.string()).optional(),
   reason: z.string().nullable().optional(),
 });
 
@@ -186,6 +189,72 @@ function getRouteOverride(userText: string): "web" | "none" | null {
   return null;
 }
 
+function isLikelyDbIntent(userText: string): boolean {
+  const normalized = userText.toLowerCase();
+  return /\b(table|tables|database|db|sql|record|records|count|row|rows|user|users|email|registered|register|latest|last)\b/.test(
+    normalized,
+  );
+}
+
+async function generateDbFallbackPlan(
+  userText: string,
+  modelId: string,
+): Promise<PlannerResult | null> {
+  try {
+    const result = await generateText({
+      model: groq(modelId),
+      temperature: 0,
+      prompt: `User request: "${userText}"
+
+You must return JSON only, and action must be "db".
+Generate a best-effort read-only SQL query using common likely tables (users, vendors, vendor_services) when exact schema is not available.
+Use only SELECT / WITH ... SELECT and positional params if needed.
+
+Return STRICT JSON only:
+{
+  "action": "db",
+  "intent": string,
+  "webQuery": null,
+  "sql": string,
+  "params": Array<string|number|boolean|null>,
+  "selectedTables": Array<string>,
+  "reason": string | null
+}`,
+    });
+
+    const maybeJson = extractJsonObject(result.text);
+    if (!maybeJson) return null;
+    const parsedRaw = JSON.parse(maybeJson) as Record<string, unknown>;
+    const parsed = {
+      ...parsedRaw,
+      action: "db",
+      reason:
+        parsedRaw.reason == null
+          ? "DB fallback planner used due to missing schema snapshot."
+          : typeof parsedRaw.reason === "string"
+            ? parsedRaw.reason
+            : String(parsedRaw.reason),
+      webQuery: undefined,
+      sql:
+        parsedRaw.sql == null
+          ? undefined
+          : typeof parsedRaw.sql === "string"
+            ? parsedRaw.sql
+            : String(parsedRaw.sql),
+      selectedTables: Array.isArray(parsedRaw.selectedTables)
+        ? parsedRaw.selectedTables.map((t) => String(t).toLowerCase())
+        : undefined,
+    };
+    const validated = DbPlanSchema.safeParse(parsed);
+    if (!validated.success || validated.data.action !== "db" || !validated.data.sql) {
+      return null;
+    }
+    return validated.data;
+  } catch {
+    return null;
+  }
+}
+
 async function planToolInvocation(
   userText: string,
   modelId: string,
@@ -203,11 +272,41 @@ async function planToolInvocation(
   }
 
   let schemaContext = "";
+  let selectedTables: string[] = [];
+  let schemaUnavailable = false;
   try {
     const snapshot = await getSchemaSnapshot();
-    schemaContext = buildSchemaPromptContext(snapshot, userText, 12);
+    const keywordCandidates = getKeywordCandidateTables(userText, snapshot, 8);
+    const tableIndex = buildTableIndex(snapshot, keywordCandidates);
+
+    const selector = await generateText({
+      model: groq(modelId),
+      temperature: 0,
+      prompt: `Select only the relevant tables for this request.
+User request: "${userText}"
+
+Allowed candidate tables:
+${tableIndex}
+
+Return only a comma-separated list of table names. No explanation.`,
+      maxTokens: 40,
+    });
+
+    const picked = selector.text
+      .split(",")
+      .map((t) => t.trim().toLowerCase())
+      .filter(Boolean);
+    const allowed = new Set(keywordCandidates.map((t) => t.toLowerCase()));
+    selectedTables = [...new Set(picked)].filter((t) => allowed.has(t));
+    if (selectedTables.length === 0) {
+      selectedTables = keywordCandidates;
+    }
+
+    schemaContext = buildSelectedSchemaPromptContext(snapshot, selectedTables);
   } catch {
-    schemaContext = "Schema snapshot unavailable.";
+    schemaUnavailable = true;
+    schemaContext =
+      "Schema snapshot unavailable. If this is a database question, still prefer action='db' and produce best-effort read-only SQL using likely tables (users, vendors, vendor_services).";
   }
 
   let text: string;
@@ -239,6 +338,7 @@ Return STRICT JSON only:
   "webQuery": string | null,
   "sql": string | null,
   "params": Array<string|number|boolean|null>,
+  "selectedTables": Array<string>,
   "reason": string | null
 }
 
@@ -297,6 +397,10 @@ ${schemaContext}
           : typeof parsedRaw.sql === "string"
             ? parsedRaw.sql
             : String(parsedRaw.sql),
+      selectedTables:
+        Array.isArray(parsedRaw.selectedTables)
+          ? parsedRaw.selectedTables.map((t) => String(t).toLowerCase())
+          : selectedTables,
     };
 
     const result = DbPlanSchema.safeParse(parsed);
@@ -309,6 +413,17 @@ ${schemaContext}
         params: [],
         reason: "Planner JSON shape invalid; fallback to direct response.",
       };
+    }
+
+    if (
+      result.data.action === "none" &&
+      schemaUnavailable &&
+      isLikelyDbIntent(userText)
+    ) {
+      const fallback = await generateDbFallbackPlan(userText, modelId);
+      if (fallback) {
+        return fallback;
+      }
     }
 
     return result.data;
@@ -343,6 +458,28 @@ async function runDbToolIfNeeded(
       return {
         ok: false,
         context: `Database tool blocked unsafe SQL: ${guarded.reason}`,
+      };
+    }
+
+    const snapshot = await getSchemaSnapshot();
+    const selectedTables = (plan.selectedTables ?? Object.keys(snapshot.tables)).map((t) =>
+      t.toLowerCase(),
+    );
+    const tableColumns = Object.fromEntries(
+      Object.entries(snapshot.tables).map(([table, cols]) => [
+        table.toLowerCase(),
+        cols.map((c) => c.name.toLowerCase()),
+      ]),
+    );
+    const idCheck = validateSqlIdentifiers(
+      guarded.normalizedSql,
+      selectedTables,
+      tableColumns,
+    );
+    if (!idCheck.ok) {
+      return {
+        ok: false,
+        context: `Database tool blocked invalid identifiers: ${idCheck.reason}`,
       };
     }
 
@@ -409,6 +546,13 @@ export async function POST(req: Request) {
     const modelMessages = await convertToModelMessages(sanitizedMessages);
     const lastUserText = getLastUserText(sanitizedMessages);
     const plan = await planToolInvocation(lastUserText, modelId);
+    console.info("tool_plan", {
+      action: plan.action,
+      selectedTables: plan.selectedTables ?? [],
+      hasSql: Boolean(plan.sql),
+      hasWebQuery: Boolean(plan.webQuery),
+      plannerReason: plan.reason ?? null,
+    });
     const enableWebSearch = plan.action === "web";
     const isDatabaseIntent = plan.action === "db";
     const dbToolResult = await runDbToolIfNeeded(plan);
