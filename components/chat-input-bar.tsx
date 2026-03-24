@@ -18,7 +18,7 @@ export function ChatInputBar({
   onClear,
 }: ChatInputBarProps) {
   return (
-    <div className="sticky bottom-0 rounded-2xl border border-zinc-200/80 bg-white/90 p-2 shadow-lg backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/90">
+    <div className="rounded-2xl border border-zinc-200/80 bg-white/90 p-2 shadow-lg backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/90">
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <input
           className="h-11 w-full rounded-xl border border-zinc-300 bg-white px-3 text-sm outline-none ring-indigo-500 transition placeholder:text-zinc-400 focus:ring-2 dark:border-zinc-700 dark:bg-zinc-900"

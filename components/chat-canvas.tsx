@@ -20,22 +20,18 @@ function sanitizeRenderedText(text: string): string {
 }
 
 function normalizeSourceSection(text: string): string {
-  const hasMarkdownLinks = /\[[^\]]+\]\((https?:\/\/[^)]+)\)/i.test(text);
   const cleaned = text.replace(/^\s*links?\s*tags?:.*$/gim, "");
+  // Always strip trailing sources block from rendered markdown body.
+  // Supports plain `Sources`, `Sources:`, and markdown headings like `## Sources`.
+  const sourcesMatch = cleaned.match(
+    /(^|\n)\s*(?:#{1,6}\s*)?sources\s*:?\s*(?:\n|$)[\s\S]*$/i,
+  );
+  const withoutSources =
+    sourcesMatch && sourcesMatch.index !== undefined
+      ? cleaned.slice(0, sourcesMatch.index)
+      : cleaned;
 
-  if (hasMarkdownLinks) {
-    // Remove the trailing Sources block from markdown body.
-    const sourcesMatch = cleaned.match(/\n\s*sources\s*:?\s*[\s\S]*$/i);
-    if (sourcesMatch && sourcesMatch.index !== undefined) {
-      return cleaned.slice(0, sourcesMatch.index).trim();
-    }
-    return cleaned.trim();
-  }
-
-  return cleaned
-    .replace(/^\s*sources?:.*$/gim, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+  return withoutSources.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function extractSources(text: string): Array<{ label: string; url: string }> {
@@ -113,7 +109,11 @@ function MessageRow({ message, isStreaming, compact }: MessageRowProps) {
         >
           {message.role === "user" ? "You" : "Assistant"}
         </p>
-        <div className={`text-sm ${compact ? "leading-5" : "leading-6"}`}>
+        <div
+          className={`min-w-0 text-sm [overflow-wrap:anywhere] break-words ${
+            compact ? "leading-5" : "leading-6"
+          }`}
+        >
           {message.parts.map((part, idx) => {
             if (part.type === "text") {
               const sanitizedText = sanitizeRenderedText(part.text);
@@ -126,17 +126,38 @@ function MessageRow({ message, isStreaming, compact }: MessageRowProps) {
 
               return (
                 <div key={`${message.id}-${idx}`} className="space-y-2">
-                  <div className="prose prose-zinc max-w-none text-inherit dark:prose-invert prose-p:my-1.5 prose-pre:my-2 prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:border prose-pre:border-zinc-200 prose-pre:bg-zinc-50 prose-pre:p-3 dark:prose-pre:border-zinc-700 dark:prose-pre:bg-zinc-950 prose-code:rounded prose-code:bg-zinc-200/70 prose-code:px-1 prose-code:py-0.5 prose-code:before:content-[''] prose-code:after:content-[''] dark:prose-code:bg-zinc-800/90">
+                  <div className="prose prose-zinc max-w-none text-inherit dark:prose-invert prose-p:my-1.5 prose-pre:my-2 prose-pre:overflow-x-auto prose-pre:rounded-lg prose-pre:border prose-pre:border-zinc-200 prose-pre:bg-zinc-50 prose-pre:p-3 dark:prose-pre:border-zinc-700 dark:prose-pre:bg-zinc-950 prose-code:rounded prose-code:bg-zinc-200/70 prose-code:px-1 prose-code:py-0.5 prose-code:before:content-[''] prose-code:after:content-[''] dark:prose-code:bg-zinc-800/90 prose-table:my-3 prose-table:block prose-table:w-full prose-table:overflow-x-auto prose-table:rounded-lg prose-table:border prose-table:border-zinc-300 dark:prose-table:border-zinc-700 prose-th:border prose-th:border-zinc-300 prose-th:bg-zinc-100 prose-th:px-3 prose-th:py-2 dark:prose-th:border-zinc-700 dark:prose-th:bg-zinc-800 prose-td:border prose-td:border-zinc-300 prose-td:px-3 prose-td:py-2 dark:prose-td:border-zinc-700">
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}
                       components={{
-                        a: ({ ...props }) => (
+                        a: ({ href, children, ...props }) => (
                           <a
                             {...props}
+                            href={href}
                             target="_blank"
                             rel="noreferrer noopener"
                             className="text-indigo-600 underline decoration-indigo-400 underline-offset-2 dark:text-indigo-400"
+                          >
+                            {children}
+                          </a>
+                        ),
+                        img: ({ src, alt }) => (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={src}
+                            alt={alt ?? "image"}
+                            className="my-2 max-h-96 w-auto rounded-lg border border-zinc-300 object-contain dark:border-zinc-700"
                           />
+                        ),
+                        pre: ({ children }) => (
+                          <pre className="my-2 overflow-x-auto rounded-lg border border-zinc-300 bg-zinc-50 p-3 text-xs dark:border-zinc-700 dark:bg-zinc-950">
+                            {children}
+                          </pre>
+                        ),
+                        code: ({ children }) => (
+                          <code className="rounded bg-zinc-200/70 px-1 py-0.5 text-[0.9em] dark:bg-zinc-800/90">
+                            {children}
+                          </code>
                         ),
                       }}
                     >
@@ -148,7 +169,7 @@ function MessageRow({ message, isStreaming, compact }: MessageRowProps) {
                   </div>
                   {sources.length > 0 ? (
                     <div className="flex flex-wrap gap-2">
-                      {sources.map((source) => (
+                      {sources.slice(0, 6).map((source) => (
                         <a
                           key={source.url}
                           href={source.url}

@@ -445,6 +445,7 @@ export async function POST(req: Request) {
         model: groq(modelId),
         temperature: 0.2,
         system: `You are a helpful assistant. Never output any function-call syntax such as <function=...>.
+Always format your answer in clean markdown (headings, bullet lists, tables, fenced code blocks where appropriate).
 ${enableWebSearch ? "Use provided web context when relevant. Output format must be:\n1) Short answer paragraph(s)\n2) A heading exactly 'Sources'\n3) Bullet list markdown links only, each exactly: - [Title](https://...)\nNever output plain source names, tag lists, 'links tags', or any non-link source format." : ""}
 ${webContextBlock ? `\n\n${webContextBlock}` : ""}
 ${dbToolResult.context ? `\n\n${dbToolResult.context}` : ""}

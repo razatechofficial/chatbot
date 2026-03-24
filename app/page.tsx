@@ -46,6 +46,7 @@ export default function Home() {
         ) : null}
 
         <form
+          className="sticky bottom-0 z-20 mt-auto pb-2"
           onSubmit={(event) => {
             event.preventDefault();
             const prompt = input.trim();
